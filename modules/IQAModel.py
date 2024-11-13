@@ -108,82 +108,6 @@ def causal_intervene_channel(x, y, P=2, num_sigma_samples=10, max_intensity=0.1,
     return channel_causal_intensity
 
 
-# TODO
-def causal_intervene_channel_old(x, y, P=2, num_sigma_samples=10, max_intensity=0.1):
-    # x.shape: # B, C, H//win * W//win, win * win
-    # return: channel_causal_intensity: B, C, 1
-
-    B, C, patch_num_channel, patch_size = x.shape
-
-    index = np.arange(0, patch_size, 1)
-    # print(index)
-    all_samples = torch.from_numpy(index).repeat([B, C, patch_num_channel, 1]).to(x.device)
-
-    all_samples = all_samples.permute(3, 0, 1, 2)
-    x_p = x.permute(3, 0, 1, 2)
-    y_p = y.permute(3, 0, 1, 2)
-    ot = wasserstein_1d(all_samples, all_samples, x_p, y_p, p=P).sum(dim=2)
-
-    # print(ot_1)
-    # print(x.shape)  # [1, 3, 4096, 16]
-    # print(ot_1.shape) # [1, 3, 4096]
-
-    # 为每个B, C生成多个不同的sigma值（num_sigma_samples个）
-
-    # intensity_samples = torch.rand(num_sigma_samples, 1, C, 1, 1, device=x.device)
-    # intensity_samples = intensity_samples.repeat([1, B, 1, patch_num_channel, patch_size]).to(x.device)
-
-    # intensity_samples = torch.rand(num_sigma_samples, 1, C, device=x.device) # * 0.1
-    # intensity_samples = intensity_samples.repeat([1, B, 1]).to(x.device)
-
-    intensity_values = torch.arange(0.0000, max_intensity, max_intensity / 10,
-                                    device=x.device)  # 结果：[0.01, 0.02, ..., 0.1]
-    intensity_samples = intensity_values.view(-1, 1, 1).repeat(1, B, C).to(x.device)
-
-    # print(intensity_samples.shape)
-    # print(intensity_samples)
-
-    # 用来存储每个B, C上的最大扰动强度和对应的sigma
-    best_intensity = torch.zeros(B, C, device=x.device)
-
-    x_original = x.clone()
-    y_original = y.clone()
-
-    # 遍历每个sigma，计算扰动并记录最大扰动强度和对应的 intensity
-    for intensity in intensity_samples:
-        # 使用正态分布生成扰动，均值为disturbance_mean，标准差为当前sigma
-
-        _mu = torch.zeros_like(x)
-        _intensity = intensity.view(B, C, 1, 1).repeat([1, 1, patch_num_channel, patch_size])
-
-        disturbance = torch.normal(_mu, 1).to(x.device) * torch.mean((x + y) / 2, dim=[1, 2, 3],
-                                                                     keepdim=True) * _intensity
-
-        # 加入扰动
-        x_disturbed = x_original + disturbance
-        y_disturbed = y_original + disturbance
-
-        # print('x_original', x_original)
-        # print('x_disturbed', x_disturbed)
-
-        _index = np.arange(0, patch_size, 1)
-        _all_samples = torch.from_numpy(_index).repeat([B, C, patch_num_channel, 1]).to(x.device)
-
-        _all_samples = _all_samples.permute(3, 0, 1, 2)
-        x_p_disturbed = x_disturbed.permute(3, 0, 1, 2)
-        y_p_disturbed = y_disturbed.permute(3, 0, 1, 2)
-        ot_disturbed = wasserstein_1d(_all_samples, _all_samples, x_p_disturbed, y_p_disturbed, P).sum(dim=2)
-
-        # 更新最大扰动强度
-        mask = torch.abs(ot - ot_disturbed) < torch.abs(torch.sum((x - y) / 2, dim=[1, 2, 3])) * 1e-4
-        # print(mask)
-        # print(intensity.shape)
-        best_intensity[mask] = torch.max(best_intensity[mask], intensity[mask])  # intensity 的取值
-
-    channel_causal_intensity = max_intensity - best_intensity
-    # print('channel_causal_intensity', channel_causal_intensity)
-    return channel_causal_intensity
-
 
 def mv_distance_causal(X, Y, win=4, P=2, pdf_mode=0):
     B, C, H, W = X.shape
@@ -200,7 +124,11 @@ def mv_distance_causal(X, Y, win=4, P=2, pdf_mode=0):
     X_CD = torch.reshape(X_patch, [B, C, -1, win * win])
     Y_CD = torch.reshape(Y_patch, [B, C, -1, win * win])
 
-    if pdf_mode == 0:
+    # pdf_mode = -1  #TODO test
+    if pdf_mode == -1:
+        X_pdf = X_CD
+        Y_pdf = Y_CD
+    elif pdf_mode == 0:
         X_CD_pdf = X_CD / (X_sum.view(B, 1, 1, 1) + 1e-6)
         Y_CD_pdf = Y_CD / (Y_sum.view(B, 1, 1, 1) + 1e-6)
         X_pdf = X_CD * X_CD_pdf
@@ -234,207 +162,29 @@ def mv_distance_causal(X, Y, win=4, P=2, pdf_mode=0):
     y_p = Y_pdf.permute(3, 0, 1, 2) * channel_causal_intensity.view(1, B, C, 1) / max_intensity
     ot = wasserstein_1d(all_samples, all_samples, x_p, y_p, P)  # B, C, patch_num_channel
     tmp_ot = torch.reshape(ot, [B, C, H // win, W // win])
-    final_ot = ot.sum(dim=[1, 2])
-    # return final_ot, patch_num_channel, tmp_ot
 
     # md
     X_pdf = X_pdf * channel_causal_intensity.view(B, C, 1, 1) / max_intensity
     Y_pdf = Y_pdf * channel_causal_intensity.view(B, C, 1, 1) / max_intensity
-    md = torch.norm(X_pdf - Y_pdf, p=1, dim=3, keepdim=True)
+    md = torch.norm(X_pdf - Y_pdf, p=2, dim=3, keepdim=True)
     tmp_md = torch.reshape(md, [B, C, H // win, W // win])
-    final_md = md.sum(dim=[1, 2, 3])
-    # return final_md, patch_num_channel, tmp_md
 
-    final = final_ot + final_md
-    tmp = tmp_ot + tmp_md
+    # L2
+    X_CD = X_CD * channel_causal_intensity.view(B, C, 1, 1) / max_intensity
+    Y_CD = Y_CD * channel_causal_intensity.view(B, C, 1, 1) / max_intensity
+    L2 = ((X_CD - Y_CD) ** 2).sum(dim=3, keepdim=True)
+    tmp_L2 = torch.reshape(L2, [B, C, H // win, W // win])
 
-    return final, patch_num_channel, tmp
+    # final_tmp = tmp_md  # LIVE CSIQ
+    # final_tmp = tmp_L2  # TID2008
+    # final_tmp = tmp_ot
+    final_tmp = tmp_ot + tmp_md  # TID2013 KADID PIPAL
+    # final_tmp = tmp_ot + tmp_L2
 
+    final = final_tmp.sum(dim=[1, 2, 3])
 
-def causal_intervene_patch(x, y, P=2):
-    # x.shape: [B, -1, win * win]
-
-    B, patch_num, patch_size = x.shape
-
-    index = np.arange(0, patch_size, 1)
-    # print(index)
-    all_samples = torch.from_numpy(index).repeat([B, patch_num, 1]).to(x.device)
-
-    # ot.emd2(alpha, beta, M)
-    # ot.sinkhorn2(a, b, M, reg)
-
-    all_samples = all_samples.permute(2, 0, 1)
-    x_p = x.permute(2, 0, 1)
-    y_p = y.permute(2, 0, 1)
-    ot_1 = wasserstein_1d(all_samples, all_samples, x_p, y_p, P)
-    # print(ot_1)
-    # print(ot_1.shape)
-
-    # 加入随机扰动
-    sigma = 0.1
-
-    # mu = (x.mean(dim=-1, keepdim=True) + y.mean(dim=-1, keepdim=True)) / 2
-    # random_dist = torch.normal(mu.expand(-1, -1, patch_size), sigma).to(x.device)
-
-    mu = torch.zeros_like(x)
-    random_dist = torch.normal(mu, sigma).to(x.device)
-
-    # print(random_dist.shape)
-
-    # 数据的形状为 B, num, 16
-    # 在每个 B num 上，生成一个 长度为 16 的变量
-
-    # TODO 浅层和深层的 不一样
-
-    x_causal = x + random_dist
-    y_causal = y + random_dist
-
-    # 计算 距离
-    x_causal_p = x_causal.permute(2, 0, 1)
-    y_causal_p = y_causal.permute(2, 0, 1)
-    ot_2 = wasserstein_1d(all_samples, all_samples, x_causal_p, y_causal_p, P)
-
-    # 获得不变变量
-    # 获得与x形状一样的变量
-    causal_map = ot_1 != ot_2
-    causal_map = causal_map.unsqueeze(-1).repeat([1, 1, patch_size])
-    causal_map = causal_map.view(B, patch_num, patch_size)
-
-    # print(causal_map, causal_map.shape, causal_map.sum(), (~causal_map).sum())
-
-    return causal_map
-
-
-def mv_distance_patch_causal(X, Y, win=4):
-    B, C, H, W = X.shape
-    X_sum = X.sum(dim=[1, 2, 3])
-    Y_sum = Y.sum(dim=[1, 2, 3])
-
-    X_patch = torch.reshape(X, [B, C, H // win, win, W // win, win])
-    Y_patch = torch.reshape(Y, [B, C, H // win, win, W // win, win])
-
-    X_patch = X_patch.permute(0, 1, 2, 4, 3, 5)
-    Y_patch = Y_patch.permute(0, 1, 2, 4, 3, 5)
-
-    X_1D = torch.reshape(X_patch, [B, -1, win * win])
-    Y_1D = torch.reshape(Y_patch, [B, -1, win * win])
-
-    X_1D_pdf = X_1D / (X_sum.view(B, 1, 1) + 1e-6)
-    Y_1D_pdf = Y_1D / (Y_sum.view(B, 1, 1) + 1e-6)
-
-    X_pdf = X_1D * X_1D_pdf
-    Y_pdf = Y_1D * Y_1D_pdf
-
-    # 找到 因果不变
-    causal_map = causal_intervene_patch(X_pdf, Y_pdf)
-
-    # 根据 causal_map，过滤 X_pdf 中的元素，保持原来的大小
-    X_pdf = torch.where(causal_map, X_pdf, torch.tensor([0.]).to(X.device))
-    Y_pdf = torch.where(causal_map, Y_pdf, torch.tensor([0.]).to(X.device))
-
-    # print(X_pdf_causal.shape)
-
-    md = torch.norm(X_pdf - Y_pdf, p=1, dim=2, keepdim=True)
-    tmp_md = torch.reshape(md, [B, C, H // win, W // win])
-    # md = md.mean(dim=1, keepdim=True)
-    md = md.sum(dim=1, keepdim=True)
-
-    # _X = X_1D_pdf.unsqueeze(dim=3)
-    # __X = _X.transpose(2, 3)
-    # _Y = Y_1D_pdf.unsqueeze(dim=3)
-    # __Y = _Y.transpose(2, 3)
-    # vd = torch.norm(_X * __X - _Y * __Y, p='nuc', dim=[2, 3], keepdim=True).sum(dim=1, keepdim=True)
-
-    final = md.squeeze(2).squeeze(1)
-    # final = vd.squeeze(3).squeeze(2).squeeze(1)
-    # final = md.squeeze(2).squeeze(1) + vd.squeeze(3).squeeze(2).squeeze(1)
-
-    # print(X_1D, X_sum, X_1D_pdf)
-    # print(X_1D.shape[1], md.squeeze(2).squeeze(1), vd.squeeze(3).squeeze(2).squeeze(1))
-
-    # index = np.arange(0, X_pdf_causal.shape[2], 1)
-    # # print(index)
-    # all_samples = torch.from_numpy(index).repeat([B, X_pdf_causal.shape[1], 1]).to(X_pdf_causal.device)
-    #
-    # all_samples = all_samples.permute(2, 0, 1)
-    # x_p = X_pdf_causal.permute(2, 0, 1)
-    # y_p = Y_pdf_causal.permute(2, 0, 1)
-    #
-    # md = wasserstein_1d(all_samples, all_samples, x_p, y_p, 2)
-    # tmp_md = torch.reshape(md, [B, C, H // win, W // win])
-    # md = md.sum(dim=1, keepdim=True)
-    #
-    # final = md.squeeze(1)
-
-    return final, X_1D.shape[1], tmp_md
-
-
-def mv_distance_patch(X, Y, win=4):
-    B, C, H, W = X.shape
-    X_sum = X.sum(dim=[1, 2, 3])
-    Y_sum = Y.sum(dim=[1, 2, 3])
-
-    X_patch = torch.reshape(X, [B, C, H // win, win, W // win, win])
-    Y_patch = torch.reshape(Y, [B, C, H // win, win, W // win, win])
-
-    X_patch = X_patch.permute(0, 1, 2, 4, 3, 5)
-    Y_patch = Y_patch.permute(0, 1, 2, 4, 3, 5)
-
-    X_1D = torch.reshape(X_patch, [B, -1, win * win])
-    Y_1D = torch.reshape(Y_patch, [B, -1, win * win])
-
-    X_1D_pdf = X_1D / (X_sum.view(B, 1, 1) + 1e-6)
-    Y_1D_pdf = Y_1D / (Y_sum.view(B, 1, 1) + 1e-6)
-
-    X_pdf = X_1D * X_1D_pdf
-    Y_pdf = Y_1D * Y_1D_pdf
-
-    md = torch.norm(X_pdf - Y_pdf, p=2, dim=2, keepdim=True)
-    tmp_md = torch.reshape(md, [B, C, H // win, W // win])
-    md = md.mean(dim=1, keepdim=True)
-
-    # _X = X_1D_pdf.unsqueeze(dim=3)
-    # __X = _X.transpose(2, 3)
-    # _Y = Y_1D_pdf.unsqueeze(dim=3)
-    # __Y = _Y.transpose(2, 3)
-    # vd = torch.norm(_X * __X - _Y * __Y, p='nuc', dim=[2, 3], keepdim=True).mean(dim=1, keepdim=True) * X_1D.shape[1]
-
-    final = md.squeeze(2).squeeze(1)
-    # final = vd.squeeze(3).squeeze(2).squeeze(1)
-    # final = md.squeeze(2).squeeze(1) + vd.squeeze(3).squeeze(2).squeeze(1)
-
-    # print(X_1D, X_sum, X_1D_pdf)
-    # print(X_1D.shape[1], md.squeeze(2).squeeze(1), vd.squeeze(3).squeeze(2).squeeze(1))
-    return final, X_1D.shape[1], tmp_md
-
-
-def mv_distance_sample(X, Y, win=4):
-    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-    B, C, H, W = X.shape
-    X_sum = X.sum(dim=[1, 2, 3])
-    Y_sum = Y.sum(dim=[1, 2, 3])
-
-    X_1D = torch.reshape(X, [B, win * win, -1])
-    Y_1D = torch.reshape(Y, [B, win * win, -1])
-
-    X_1D_pdf = X_1D / (X_sum + 1e-6)
-    Y_1D_pdf = Y_1D / (Y_sum + 1e-6)
-
-    X_pdf = X_1D * X_1D_pdf
-    Y_pdf = Y_1D * Y_1D_pdf
-
-    md = torch.norm(X_pdf - Y_pdf, p=2, dim=1, keepdim=True).mean(dim=2, keepdim=True)
-
-    _X = X_1D_pdf.unsqueeze(dim=2)
-    __X = _X.transpose(1, 2)
-    _Y = Y_1D_pdf.unsqueeze(dim=2)
-    __Y = _Y.transpose(1, 2)
-
-    vd = torch.norm(_X * __X - _Y * __Y, p='nuc', dim=[1, 2], keepdim=True).mean(dim=3, keepdim=True)
-
-    # final = md.squeeze(2).squeeze(1)
-    final = vd.squeeze(3).squeeze(2).squeeze(1)
-    return final
+    # print(tmp_ot.sum(), tmp_md.sum(), tmp_L2.sum())
+    return final, patch_num_channel, final_tmp
 
 
 class DeepCausalQualityVGG(torch.nn.Module):
@@ -738,14 +488,12 @@ if __name__ == '__main__':
     import argparse
     from torchvision import transforms
 
-
-    def prepare_image_deepwsd(image, repeatNum=1):
+    def prepare_image_dcq(image):
         H, W = image.size
-        if max(H, W) > 512 and max(H, W) < 1000:
-            image = transforms.functional.resize(image, [256, 256])
+        if max(H, W) > 288:
+            image = transforms.functional.resize(image, [288, 288])
         image = transforms.ToTensor()(image).unsqueeze(0)
         return image
-
 
     parser = argparse.ArgumentParser()
     parser.add_argument('--ref', type=str, default='../images/1600.png')
@@ -754,12 +502,10 @@ if __name__ == '__main__':
 
     device = torch.device('cpu')
 
-    ref = prepare_image_deepwsd(Image.open(args.ref).convert("RGB")).to(device)
-    dist = prepare_image_deepwsd(Image.open(args.dist).convert("RGB")).to(device)
+    ref = prepare_image_dcq(Image.open(args.ref).convert("RGB")).to(device)
+    dist = prepare_image_dcq(Image.open(args.dist).convert("RGB")).to(device)
 
-    model = DeepCausalQualityEFF().to(device)
+    model = DeepCausalQualityVGG().to(device)
     # print(model)
     score = model(ref, dist)
     print(score)
-    # log    score: 5.9455
-    # log**2 score: 35.3489
